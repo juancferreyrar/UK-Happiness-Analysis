@@ -1,0 +1,410 @@
+---
+title: "UK Happiness Analysis"
+author: 'Juan Carlos Ferreyra'
+date: "2025-05-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Data Exploration 
+
+Exploratory Data Analysis
+
+```{r}
+#Importing all necessary libraries
+set.seed("42244")
+library(xtable)
+library(tidyverse)
+
+
+#UK Country code in data set is 27
+all_data <- eqls_2011
+uk_data  <- all_data %>%
+  filter(Y11_Country == 27)
+
+#Redefining variable names for simplicity and aesthetics
+data_explore <- uk_data %>%
+  select(
+    happiness = Y11_Q41, #Response variable of interest)
+    mw_index   = Y11_MWIndex, #This is the mental wellness index (From 1 to 100)     
+    social_sat = Y11_Q40g,        
+    life_sat   = Y11_Q30,         #Life satisfaction rate
+    soc_excl   = Y11_SocExIndex,  #Social exclusion
+    age_cat    = Y11_Agecategory, #Youngest individuals are 18 years old
+    gender     = Y11_HH2a,
+    inc_quart  = Y11_Incomequartiles_percapita,
+    health     = Y11_Q42,         
+    emp_status = Y11_EmploymentStatus,
+    educ       = Y11_ISCEDsimple, #Education is measured through stages (PHD, University, School, etc)
+    trust      = Y11_Q24   #Trust in this context represents social trust       
+  )
+
+cont_preds <- data_explore %>% #cont abbreviation means "control" variables, or variables of interest with a potential interferance on domain variables if excluded
+  select(age_cat,gender,inc_quart,health,emp_status,educ,trust)
+qol_preds <- data_explore %>% #qol abbreviation means "quality of life", used for the 4 domain factors mentioned throughout the report
+  select(mw_index, social_sat, life_sat, soc_excl)
+
+#create a separation between control and quality of life (domain) variables
+describe(cont_preds)
+
+describe(qol_preds)
+
+
+```
+
+Evaluating Data Missingness
+```{r}
+#Evaluating missing variables
+library(naniar)
+vis_miss(cont_preds)
+
+#Missing income for specific insight
+data_explore  %>%
+  mutate(inc_missing = ifelse(is.na(inc_quart), "Missing", "Observed")) %>%
+  group_by(inc_missing)  %>%
+  summarise(
+    mean_happiness = mean(happiness, na.rm = TRUE),
+    count = n()
+  )
+
+data_missing <- data_explore  %>% #Grouping by age to see if there is underlying pattern between missing data, marking as MCAR
+  mutate(inc_missing = is.na(inc_quart))
+miss_by_age <- data_missing  %>%
+  group_by(age_cat)  %>%
+  summarise(
+    pct_missing = mean(inc_missing) * 100,
+    n = n()
+  )
+ggplot(miss_by_age, aes(x=age_cat, y=pct_missing)) +
+  geom_col(fill = "blue") +
+  geom_text(aes(label = paste0(round(pct_missing,1),"%")), 
+            vjust = -0.5, size = 4) +
+  labs(
+    title = "Percentage of Missing Income Quartile by Age Group",
+    x     = "Age Group",
+    y     = "Missing Data (%)"
+  ) +
+  theme_minimal()
+
+#Removing income based on what was reported
+data_explore <- data_explore %>% 
+  select(-inc_quart)
+cont_preds <- cont_preds %>%
+  select(-inc_quart)
+```
+
+Boxplots & Bivariate Testing 
+
+```{r}
+library(ggplot2)
+
+ggplot(data_explore, aes(x = factor(age_cat), y = happiness)) +
+  geom_boxplot(fill = "blue") +
+  labs(
+    title = "Happiness by Age Group",
+    x = "Age Group",
+    y = "Self-reported Happiness (1–10)"
+  )
+
+ggplot(data_explore, aes(x = factor(gender), y = happiness)) +
+  geom_boxplot(fill = "red") +
+  labs(
+    title = "Happiness by Gender",
+    x = "Gender (1=Male, 2=Female)", #Evaluate, minimal difference
+    y = "Happiness (1–10)"
+  )
+
+ggplot(data_explore, aes(x = factor(emp_status), y = happiness)) +
+  geom_boxplot(fill = "green") +
+  coord_flip() +
+  labs(
+    title = "Happiness by Employment Status",
+    x = "Employment Status",
+    y = "Happiness (1–10)"
+  )
+
+ggplot(data_explore, aes(x = factor(educ), y = happiness)) +
+  geom_boxplot(fill = "purple") +
+  coord_flip() +
+  labs(
+    title = "Happiness by Education Level",
+    x = "Education",
+    y = "Happiness (1–10)"
+  )
+
+ggplot(data_explore, aes(x = factor(health), y = happiness)) +
+  geom_boxplot(fill = "brown") +
+  coord_flip() +
+  labs(
+    title = "Happiness by Self-Rated Health",
+    x = "Health",
+    y = "Happiness (1–10)"
+  )
+
+ggplot(data_explore, aes(x = factor(trust), y = happiness)) +
+  geom_boxplot(fill = "yellow") +
+  coord_flip() +
+  labs(
+    title = "Generalized Trust and Happiness",
+    x = "Trust (1–10)",
+    y = "Happiness (1–10)"
+  )
+
+#T test to determine significance
+t.test(happiness ~ gender, data = data_explore)
+
+
+#Removing gender
+data_explore <- data_explore %>% 
+  select(-gender)
+cont_preds <- cont_preds %>% 
+  select(-gender)
+
+```
+
+Correlation Matrix
+```{r}
+library(corrplot)
+M2 <- cor(data_explore, use = "pairwise.complete.obs")
+corrplot(M2, method = "color", tl.cex = 0.7, 
+         title = "Correlations Among Predictors", 
+         mar = c(0,0,1,0))
+
+#No critical correlation, but some to examine later on in the project can be identified
+```
+
+# Regression
+
+```{r}
+
+corr_df <- map_dbl(qol_preds, ~ cor(.x, data_explore$happiness, use = "complete.obs")) %>% enframe(name = "variable", value = "correlation") %>%
+  arrange(correlation)
+
+
+corr2_df <- map_dbl(cont_preds, ~ cor(.x, data_explore$happiness, use = "complete.obs")) %>% enframe(name = "variable", value = "correlation") %>%
+  arrange(correlation)
+
+ggplot(corr_df, aes(x = reorder(variable, correlation), y = correlation, fill = correlation > 0)) + geom_col() + coord_flip() +
+  scale_fill_manual(values = c("TRUE" = "blue", "FALSE" = "red")) +
+  labs(
+    title = "Bivariate Correlations with Happiness (QoL Domains Only)",
+    x     = "Domain",
+    y     = "Pearson r",
+    fill  = "Direction"
+  ) +
+  theme_minimal()
+ggplot(corr2_df, aes(x = reorder(variable, correlation), y = correlation, fill = correlation>0)) +
+  geom_col()  +
+  coord_flip() +
+  scale_fill_manual(values = c("TRUE" = "blue", "FALSE" = "red")) +
+  labs(
+    title = "Bivariate Correlations with Happiness (Control Domains Only)",
+    x     = "Domain",
+    y     = "Pearson r",
+    fill  = "Direction"
+  ) +
+  theme_minimal()
+```
+Model Specification/B. Unstandarized/C. Standarized
+```{r}
+#The first model, the factor() function is applied
+first_mod <- lm(
+  happiness ~ 
+    life_sat   + 
+    mw_index   + 
+    social_sat + 
+    soc_excl   +
+    factor(age_cat) + 
+    factor(emp_status) +
+    factor(educ) +
+    factor(health) +
+    trust, #Trust is not a domain variable, but because of its scale, it should not include the "factor" label
+  data = data_explore
+)
+first_mod <- first_mod %>%
+  na.omit() #Listwise deletion-mentioned in limitations
+
+summary(first_mod)
+
+key_terms <- c("(Intercept)", "life_sat", "mw_index", "social_sat", "soc_excl")
+key_coefs <- coef(summary(first_mod))
+key_coefs[key_terms, ]
+
+#The standardization of data is conducted in order to improve comparison
+
+data_scaled <- data_explore %>%
+  mutate(
+    happiness_z = as.numeric(scale(happiness)),
+    life_sat_z  = as.numeric(scale(life_sat)),
+    mw_index_z  = as.numeric(scale(mw_index)),
+    social_sat_z= as.numeric(scale(social_sat)),
+    soc_excl_z  = as.numeric(scale(soc_excl)),
+    trust_z     = as.numeric(scale(trust))
+  )
+
+scaled_mod <- lm(
+  happiness_z ~ 
+    life_sat_z + mw_index_z + social_sat_z + soc_excl_z + factor(age_cat) + factor(emp_status) + factor(educ) + factor(health) + trust,
+  data = data_scaled
+)
+
+coef(summary(scaled_mod))[c("life_sat_z","mw_index_z","social_sat_z","soc_excl_z"), ]
+
+```
+
+Model Diagnostics
+
+```{r}
+plot(first_mod, which = 1, 
+     main  = "Residuals vs. Fitted")
+
+plot(first_mod, which = 2, 
+     main = "Normal Q–Q Plot")
+
+cd <- cooks.distance(first_mod)
+
+#Formula stated in class to determine an appropiate threshold
+n      <- nobs(first_mod)
+p      <- length(coef(first_mod)) - 1
+cutoff <- 4 / (n - p - 1)
+
+
+infl_obs <- which(cd > cutoff)
+length(infl_obs)  
+infl_obs          
+
+data_explore[infl_obs, c("happiness", "mw_index", "social_sat", "life_sat", "soc_excl")]
+
+
+plot(cd, 
+     type = "h", 
+     ylab = "Cook's distance", 
+     main = "Cook’s Distance for Each Observation")
+
+
+```
+
+Transformation 
+```{r}
+#Transformation is based on the fact that outliers might be able to be controlled.
+data_refine <- data_explore %>%
+  mutate(soc_excl_sqrt = sqrt(soc_excl),
+         mw_log       = log(mw_index + 1))
+mod_tr  <- lm(happiness ~ life_sat + mw_log + social_sat + soc_excl_sqrt +
+              factor(age_cat) + factor(emp_status) +
+              factor(educ) + factor(health) + trust,
+              data = data_refine)
+AIC(first_mod, mod_tr)         
+```
+
+```{r}
+library(car)
+#Conduct VIF/GIF and standarized GVIF
+vif_vals <- vif(first_mod)
+vif_vals
+
+
+```
+
+```{r}
+library(glmnet)
+df <- data_explore %>%
+  mutate(
+    mw_log        = log(mw_index + 1),
+    soc_excl_sqrt = sqrt(soc_excl)
+  ) %>%
+  na.omit()
+X <- model.matrix( #Base the model on the new, tranformed model.
+       happiness ~ life_sat + mw_log + social_sat + soc_excl_sqrt +
+         factor(age_cat) + factor(emp_status) +
+         factor(educ) + factor(health) + trust,
+       data = df
+     )[, -1]
+y <- df$happiness
+
+
+#Ridge regression with 10 folds, deciding on the best lambda
+cv_ridge <- cv.glmnet(X, y, alpha = 0, nfolds = 10)
+best_lambda <- cv_ridge$lambda.min
+best_mse    <- cv_ridge$cvm[cv_ridge$lambda == best_lambda]
+
+
+best_lambda
+best_mse
+best_rmse <- sqrt(best_mse)
+
+
+```
+
+```{r}
+library(caret)
+vars <- all.vars(formula(first_mod))
+
+#CV is conducted, 
+df_cv <- data_explore %>% 
+  select(all_of(vars)) %>% 
+  na.omit()
+
+ctrl <- trainControl(method = "cv", number = 10, savePredictions = TRUE)
+
+cv_orig <- train(
+  formula(first_mod),
+  data      = df_cv,
+  method    = "lm",
+  trControl = ctrl
+)
+
+fold_rmse  <- cv_orig$resample$RMSE
+
+orig_mean_rmse <- mean(fold_rmse)
+orig_mean_mse  <- mean(fold_rmse^2)
+
+orig_mean_rmse
+orig_mean_mse
+
+vars2 <- all.vars(formula(mod_tr))
+
+df_cv2 <- data_refine %>% 
+  select(all_of(vars2)) %>% 
+  na.omit()
+
+ctrl <- trainControl(method = "cv", number = 10, savePredictions = TRUE)
+
+cv_tr <- train(
+  formula(mod_tr),
+  data      = df_cv2,
+  method    = "lm",
+  trControl = ctrl
+)
+fold_rmse_tr   <- cv_tr$resample$RMSE
+
+trans_mean_rmse <- mean(fold_rmse_tr)
+trans_mean_mse  <- mean(fold_rmse_tr^2)
+
+aic_orig      <- AIC(first_mod)
+aic_trans     <- AIC(mod_tr)
+
+
+#Final results to present, conclude that transformed linear is the best model, despite not having the highest MSE (Explained in report)
+results <- data.frame(
+  Model = c(
+    "Original linear",
+    "Transformed linear",
+    "Ridge (on transformed)"
+  ),
+  AIC    = c(aic_orig, aic_trans, NA),
+  RMSE   = c(orig_mean_rmse, trans_mean_rmse, best_rmse),
+  MSE    = c(orig_mean_mse,  trans_mean_mse,  best_mse),
+  Lambda = c(NA,                NA,           best_lambda),
+  stringsAsFactors = FALSE
+)
+
+print(results)
+
+    
+```
+
